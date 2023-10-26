@@ -5,9 +5,9 @@
 
 .segment "ZEROPAGE"
 Frame:   .res 1              ; Reserve 1 byte to store the number of frames
-Clock60: .res 1              ; Reserve 1 bytes to store a counter that increments every second
-BgPtr:   .res 2              ; Reserve 2 bytes to store a pointer to the background address
-                             ; Lo-byte first followed by hi-byte
+Clock60: .res 1              ; Reserve 1 byte to store a counter that increments every second (60 frames)
+BgPtr:   .res 2              ; Reserve 2 bytes (16 bits) to store a pointer to the background address
+                             ; (we store first the lo-byte, and immediately after, the hi-byte) - little endian
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; PRG-ROM code located at $8000
@@ -15,7 +15,7 @@ BgPtr:   .res 2              ; Reserve 2 bytes to store a pointer to the backgro
 .segment "CODE"
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Subroutine to load palette
+;; Subroutine to load all 32 color palette values from ROM
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 .proc LoadPalette
     PPU_SETADDR $3F00
@@ -41,7 +41,6 @@ BgPtr:   .res 2              ; Reserve 2 bytes to store a pointer to the backgro
 
     ldx #$00                 ; X = 0 --> x is the outer loop index (hi-byte) from $0 to $4
     ldy #$00                 ; Y = 0 --> y is the inner loop index (lo-byte) from $0 to $FF
-
 OuterLoop:
 InnerLoop:
     lda (BgPtr),y            ; Fetch the value *pointed* by BgPtr + Y
@@ -54,59 +53,76 @@ IncreaseHiByte:
     inc BgPtr+1              ; We increment the hi-byte pointer to point to the next background section (next 255-chunk)
     inx                      ; X++
     cpx #4                   ; Compare X with #4
-    bne OuterLoop            ;   If X is still not 4, then we keep looping back to the outer loop
-
+    bne OuterLoop            ; If X is still not 4, then we keep looping back to the outer loop
     rts                      ; Return from subroutine
 .endproc
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Subroutine to load attributes after nametable 0
+;; Subroutine to load text in the nametable until it finds a 0-terminator
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-.proc LoadAttributes
-    ldy #0
-:   lda AttributeData, y
-    sta PPU_DATA
+.proc LoadText
+    PPU_SETADDR $2105
+
+    ldy #$FF
+
+PrintLoop:
     iny
-    cpy #16
-    bne :-
-    rts
+    lda TextMessage,y
+    beq Done    
+
+    cmp #32
+    bne SPACESKIP
+    lda #$24
+    sta PPU_DATA
+    jmp PrintLoop
+
+SPACESKIP:
+    sec
+    sbc #55
+    sta PPU_DATA
+    jmp PrintLoop
+
+Done:
+    rts                      ; Return from subroutine
 .endproc
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Reset handler (called when the NES resets or powers on)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 Reset:
-    INIT_NES
+    INIT_NES                 ; Macro to initialize the NES to a known state
 
     lda #0
-    sta Frame
-    sta Clock60
+    sta Frame                ; Frame = 0
+    sta Clock60              ; Clock60 = 0
 
 Main:
-    jsr LoadPalette          ; Jump to subroutine LoadPalette
-    jsr LoadBackground       ; Jump to subroutine LoadBackground
+    jsr LoadPalette          ; Call LoadPalette subroutine to load 32 colors into our palette
+    jsr LoadBackground       ; Call LoadBackground subroutine to load a full nametable of tiles and attributes
+    jsr LoadText             ; Call LoadText subroutine to draw the text message on the nametable
 
-    lda #%10010000           ; Enable NMI and Set backround to use 2nd pattern table
+EnablePPURendering:
+    lda #%10010000           ; Enable NMI and set background to use the 2nd pattern table (at $1000)
     sta PPU_CTRL
     lda #0
-    sta PPU_SCROLL           ; Disable scroll x
-    sta PPU_SCROLL           ; Disable scroll y
+    sta PPU_SCROLL           ; Disable scroll in X
+    sta PPU_SCROLL           ; Disable scroll in Y
     lda #%00011110
-    sta PPU_MASK             ; Set PPU_MASK bits to show background
+    sta PPU_MASK             ; Set PPU_MASK bits to render the background
 
 LoopForever:
-    jmp LoopForever
+    jmp LoopForever          ; Force an infinite execution loop
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; NMI interrupt handler
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 NMI:
-    inc Frame
+    inc Frame                ; Frame++
 
-    lda Frame
-    cmp #60
-    bne :+
-    inc Clock60
+    lda Frame                ; Increment Clock60 every time we reach 60 frames (NTSC = 60Hz)
+    cmp #60                  ; Is Frame equal to #60?
+    bne :+                   ; If not, bypass Clock60 increment
+    inc Clock60              ; But if it is 60, then increment Clock60 and zero Frame counter
     lda #0
     sta Frame
 :
@@ -167,14 +183,20 @@ AttributeData:
 .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 .byte %00000000, %10101010, %10101010, %00000000, %00000000, %00000000, %10101010, %00000000
 .byte %00000000, %00000000, %00000000, %00000000, %11111111, %00000000, %00000000, %00000000
-.byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
+.byte %00000000, %00000000, %10101010, %10101010, %10101010, %10101010, %00000000, %00000000
 .byte %11111111, %00000000, %00000000, %00001111, %00001111, %00000011, %00000000, %00000000
 .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 .byte %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111
 .byte %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Here we add CHR-ROM data, included from the external .CHR file
+;; Hardcoded ASCII message stored in ROM with 0-terminator
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+TextMessage:
+.byte "HELLO WORLD",$0
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Here we add the CHR-ROM data, included from an external .CHR file
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 .segment "CHARS"
 .incbin "mario.chr"

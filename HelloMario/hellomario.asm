@@ -6,8 +6,7 @@
 .segment "ZEROPAGE"
 Frame:   .res 1              ; Reserve 1 byte to store the number of frames
 Clock60: .res 1              ; Reserve 1 byte to store a counter that increments every second (60 frames)
-BgPtr:   .res 2              ; Reserve 2 bytes (16 bits) to store a pointer to the background address
-                             ; (we store first the lo-byte, and immediately after, the hi-byte) - little endian
+BgPtr:   .res 2              ; Reserve 2 bytes (16 bits) to store a pointer to the background address (lo-byte, hi-byte)
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; PRG-ROM code located at $8000
@@ -29,6 +28,20 @@ BgPtr:   .res 2              ; Reserve 2 bytes (16 bits) to store a pointer to t
 .endproc
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Subroutine to load all 16 bytes into OAM-RAM starting at $0200
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+.proc LoadSprites
+    ldx #0
+LoopSprite:
+    lda SpriteData,x         ; We fetch bytes from the SpriteData lookup table
+    sta $0200,x              ; We store the bytes starting at OAM address $0200
+    inx                      ; X++
+    cpx #16
+    bne LoopSprite           ; Loop 16 times (4 hardware sprites, 4 bytes each)
+    rts
+.endproc
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Subroutine to load tiles and attributes into the first nametable
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 .proc LoadBackground
@@ -41,6 +54,7 @@ BgPtr:   .res 2              ; Reserve 2 bytes (16 bits) to store a pointer to t
 
     ldx #$00                 ; X = 0 --> x is the outer loop index (hi-byte) from $0 to $4
     ldy #$00                 ; Y = 0 --> y is the inner loop index (lo-byte) from $0 to $FF
+
 OuterLoop:
 InnerLoop:
     lda (BgPtr),y            ; Fetch the value *pointed* by BgPtr + Y
@@ -53,37 +67,8 @@ IncreaseHiByte:
     inc BgPtr+1              ; We increment the hi-byte pointer to point to the next background section (next 255-chunk)
     inx                      ; X++
     cpx #4                   ; Compare X with #4
-    bne OuterLoop            ; If X is still not 4, then we keep looping back to the outer loop
-    rts                      ; Return from subroutine
-.endproc
+    bne OuterLoop            ;   If X is still not 4, then we keep looping back to the outer loop
 
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Subroutine to load text in the nametable until it finds a 0-terminator
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-.proc LoadText
-    PPU_SETADDR $2105
-
-    ldy #$FF
-
-PrintLoop:
-    iny
-    lda TextMessage,y
-    beq Done    
-    
-    cmp #32
-    bne SPACESKIP
-
-    lda #$24
-    sta PPU_DATA
-    jmp PrintLoop
-
-SPACESKIP:
-    sec
-    sbc #55
-    sta PPU_DATA
-    jmp PrintLoop
-
-Done:
     rts                      ; Return from subroutine
 .endproc
 
@@ -100,7 +85,7 @@ Reset:
 Main:
     jsr LoadPalette          ; Call LoadPalette subroutine to load 32 colors into our palette
     jsr LoadBackground       ; Call LoadBackground subroutine to load a full nametable of tiles and attributes
-    jsr LoadText             ; Call LoadText subroutine to draw the text message on the nametable
+    jsr LoadSprites          ; Call LoadSprites subroutine to load all sprites into OAM-RAM
 
 EnablePPURendering:
     lda #%10010000           ; Enable NMI and set background to use the 2nd pattern table (at $1000)
@@ -119,6 +104,9 @@ LoopForever:
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 NMI:
     inc Frame                ; Frame++
+
+    lda #$02                 ; Every frame, we copy spite data starting at $02**.
+    sta $4014                ; The OAM DMA copy starts when we write to $4014.
 
     lda Frame                ; Increment Clock60 every time we reach 60 frames (NTSC = 60Hz)
     cmp #60                  ; Is Frame equal to #60?
@@ -184,17 +172,33 @@ AttributeData:
 .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 .byte %00000000, %10101010, %10101010, %00000000, %00000000, %00000000, %10101010, %00000000
 .byte %00000000, %00000000, %00000000, %00000000, %11111111, %00000000, %00000000, %00000000
-.byte %00000000, %00000000, %10101010, %10101010, %10101010, %10101010, %00000000, %00000000
+.byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 .byte %11111111, %00000000, %00000000, %00001111, %00001111, %00000011, %00000000, %00000000
 .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %00000000
 .byte %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111
 .byte %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111, %11111111
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; Hardcoded ASCII message stored in ROM with 0-terminator
+;; This is the OAM sprite attribute data data we will use in our game.
+;; We have only one big metasprite that is composed of 4 hardware sprites.
+;; The OAM is organized in sets of 4 bytes per tile.
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-TextMessage:
-.byte "HELLO WORLD",$0
+SpriteData:
+;      Y   tile#   attribs     X
+.byte $10,  $3A,  %00000000,  $10 ; OAM sprite 1 at (x: 16, y: 16)
+.byte $10,  $37,  %00000000,  $18 ; OAM sprite 2 at (x: 24, y: 16)
+.byte $18,  $4F,  %00000000,  $10 ; OAM sprite 3 at (x: 16, y: 24)
+.byte $18,  $4F,  %01000000,  $18 ; OAM sprite 4 at (x: 24, y: 24) --> flip-horz
+
+; Sprite Attribute Byte:
+;-----------------------
+; 76543210
+; |||   ||
+; |||   ++- Color Palette of sprite. Choose which set of 4 from the 16 colors to use
+; |||
+; ||+------ Priority (0: in front of background; 1: behind background)
+; |+------- Flip sprite horizontally
+; +-------- Flip sprite vertically
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Here we add the CHR-ROM data, included from an external .CHR file
